@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tetrys</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #000; font-family: Arial, Helvetica, sans-serif; }
+  body { display: grid; place-items: center; }
+  #game { position: relative; width: min(100vw, 55.56dvh); aspect-ratio: 330 / 594; background: #000; border-inline: 2px solid #252525; container-type: inline-size; }
+  canvas { display: block; width: 100%; height: 93.6%; }
+  .header { position: absolute; inset: 0 0 auto; height: 15.6%; border-bottom: 1px solid #e00000; color: white; }
+  #score { position: absolute; top: 20%; left: 23%; width: 54%; text-align: center; font-size: 19cqw; font-weight: 400; line-height: 1; }
+  #high { position: absolute; top: 100%; padding-top: 1px; width: 100%; text-align: center; font-size: 5cqw; white-space: nowrap; }
+  button { border: 0; padding: 0; cursor: pointer; color: #fff; background: transparent; touch-action: manipulation; }
+  button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+  .action { position: absolute; top: 29%; width: 12%; height: 43%; display: grid; place-items: center; }
+  .action svg { width: 100%; height: 100%; fill: currentColor; }
+  #restart { left: 8.5%; }
+  #pause { right: 9%; }
+  #next { position: absolute; top: 1.1%; right: 2.5%; width: 10%; height: 5.5%; }
+  .base { position: absolute; bottom: 0; width: 100%; height: 6.4%; background: #222; }
+  #message { position: absolute; top: 43%; width: 100%; text-align: center; color: #fff; background: #000d; padding: 14px 4px; font-size: 7cqw; }
+  #message small { display: block; font-size: 4cqw; margin-top: 9px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main id="game" aria-label="Tetrys. Left and right arrows move, up rotates, down drops faster.">
+  <canvas id="board" width="660" height="1112" aria-label="Tetrys playing field"></canvas>
+  <div class="header">
+    <output id="score" aria-label="Score">0</output>
+    <button class="action" id="restart" title="Restart" aria-label="Restart game"><svg viewBox="0 0 40 40" aria-hidden="true"><path d="M10 9A16 16 0 1 1 7 30l5-5A9 9 0 1 0 14 15l6 3H3V2z"/></svg></button>
+    <button class="action" id="pause" title="Pause" aria-label="Pause game"><svg viewBox="0 0 40 40" aria-hidden="true"><path id="pauseIcon" d="M7 5h9v30H7zM24 5h9v30h-9z"/></svg></button>
+    <div id="high">High Score: <span id="best">0</span></div>
+  </div>
+  <canvas id="next" width="64" height="64" aria-label="Next piece"></canvas>
+  <div id="message" role="status" hidden></div>
+  <footer class="base"></footer>
+</main>
+<script>
+'use strict';
+const COLS = 10, ROWS = 18, LIMIT = 3, FALL_MS = 750;
+const COLORS = ['#ffe637', '#00ed66', '#ff0080', '#eb27f2', '#3975ff', '#08bce9', '#ff9100'];
+const SHAPES = [ [[1,1],[1,1]], [[0,1,1],[1,1,0]], [[1,1,0],[0,1,1]], [[0,1,0],[1,1,1]], [[1,0,0],[1,1,1]], [[1,1,1,1]], [[0,0,1],[1,1,1]] ];
+const canvas = document.getElementById('board'), ctx = canvas.getContext('2d');
+const preview = document.getElementById('next'), previewCtx = preview.getContext('2d');
+const scoreEl = document.getElementById('score'), bestEl = document.getElementById('best');
+const pauseButton = document.getElementById('pause'), icon = document.getElementById('pauseIcon');
+const message = document.getElementById('message');
+let grid, piece, next, bag = [], score = 0, best = 0, paused = false, over = false, timer;
+const held = new Map();
+try { best = Math.max(0, Number(localStorage.getItem('tetrys-high-score')) || 0); } catch (_) {}
+function takePiece() {
+  if (!bag.length) {
+    bag = [0,1,2,3,4,5,6];
+    for (let i = bag.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [bag[i], bag[j]] = [bag[j], bag[i]]; }
+  }
+  const type = bag.pop();
+  return { shape: SHAPES[type].map(row => row.slice()), color: COLORS[type], x: 0, y: LIMIT };
+}
+function cells(p, fn) { p.shape.forEach((row,y) => row.forEach((v,x) => { if (v) fn(p.x+x,p.y+y); })); }
+function fits(p) {
+  let valid = true;
+  cells(p, (x,y) => { if (x < 0 || x >= COLS || y < 0 || y >= ROWS || grid[y][x]) valid = false; });
+  return valid;
+}
+function aboveLine(p) { let above = false; cells(p, (_,y) => { if (y < LIMIT) above = true; }); return above; }
+function updateScore(points = 0) {
+  score += points;
+  if (score > best) { best = score; try { localStorage.setItem('tetrys-high-score', String(best)); } catch (_) {} }
+  scoreEl.textContent = score;
+  scoreEl.style.fontSize = (score.toString().length > 4 ? Math.min(19, 85 / score.toString().length) : 19) + 'cqw';
+  bestEl.textContent = best;
+}
+function stopHeld() { held.clear(); }
+function gameOver() { over = true; clearInterval(timer); stopHeld(); showState(); }
+function spawn() {
+  piece = next; next = takePiece(); piece.x = Math.floor((COLS - piece.shape[0].length) / 2);
+  if (!fits(piece) || aboveLine(piece)) gameOver();
+}
+function startTimer() { clearInterval(timer); timer = setInterval(() => { if (!paused && !over) drop(false); }, FALL_MS); }
+function restart() {
+  clearInterval(timer); stopHeld(); grid = Array.from({length: ROWS}, () => Array(COLS).fill(null));
+  bag = []; score = 0; paused = false; over = false; next = takePiece(); spawn(); updateScore(); showState(); draw(); startTimer();
+}
+function lock() {
+  cells(piece, (x,y) => { grid[y][x] = piece.color; });
+  if (aboveLine(piece)) { gameOver(); return; }
+  const remaining = grid.filter(row => !row.every(Boolean));
+  const cleared = ROWS - remaining.length;
+  while (remaining.length < ROWS) remaining.unshift(Array(COLS).fill(null));
+  grid = remaining;
+  if (cleared) updateScore([0,100,300,500,800][cleared]);
+  spawn();
+}
+function drop(soft) {
+  const moved = {...piece, y: piece.y + 1};
+  if (fits(moved)) { piece = moved; if (soft) updateScore(1); } else lock();
+  draw();
+}
+function move(dx) { const moved = {...piece, x: piece.x + dx}; if (fits(moved)) piece = moved; draw(); }
+function rotate() {
+  const shape = piece.shape[0].map((_,x) => piece.shape.map(row => row[x]).reverse());
+  for (const dx of [0,-1,1,-2,2]) {
+    const rotated = {...piece, shape, x: piece.x + dx};
+    if (fits(rotated)) { piece = rotated; if (aboveLine(piece)) gameOver(); break; }
+  }
+  draw();
+}
+function showState() {
+  icon.setAttribute('d', paused || over ? 'M10 4l25 16-25 16z' : 'M7 5h9v30H7zM24 5h9v30h-9z');
+  pauseButton.setAttribute('aria-label', paused ? 'Resume game' : 'Pause game');
+  pauseButton.title = paused ? 'Resume' : 'Pause';
+  message.hidden = !paused && !over;
+  message.innerHTML = over ? 'Game over<small>Press any arrow key to restart</small>' : 'Paused';
+}
+function togglePause() { if (over) return; paused = !paused; stopHeld(); if (paused) clearInterval(timer); else startTimer(); showState(); }
+function draw() {
+  ctx.fillStyle = '#000'; ctx.fillRect(0,0,canvas.width,canvas.height);
+  const w = canvas.width / COLS, h = canvas.height / ROWS;
+  function block(x,y,color) { ctx.fillStyle = color; ctx.fillRect(Math.round(x*w),Math.round(y*h),Math.round((x+1)*w)-Math.round(x*w),Math.round((y+1)*h)-Math.round(y*h)); }
+  grid.forEach((row,y) => row.forEach((color,x) => { if (color) block(x,y,color); }));
+  // A blocked spawn ends the game without drawing a piece over the settled stack.
+  if (piece && fits(piece)) cells(piece, (x,y) => block(x,y,piece.color));
+  previewCtx.clearRect(0,0,64,64);
+  const size = 16, offsetX = 64 - next.shape[0].length * size;
+  previewCtx.fillStyle = next.color;
+  next.shape.forEach((row,y) => row.forEach((v,x) => { if (v) previewCtx.fillRect(offsetX+x*size,y*size,size,size); }));
+}
+const actions = { ArrowLeft: () => move(-1), ArrowRight: () => move(1), ArrowUp: rotate, ArrowDown: () => drop(true) };
+document.addEventListener('keydown', event => {
+  if (!actions[event.key]) return;
+  event.preventDefault();
+  if (event.repeat || held.has(event.key)) return;
+  if (over) { restart(); return; }
+  if (paused) return;
+  actions[event.key]();
+  if (!over) held.set(event.key, performance.now() + (event.key === 'ArrowDown' ? 65 : 170));
+});
+document.addEventListener('keyup', event => held.delete(event.key));
+setInterval(() => {
+  if (paused || over) return;
+  const now = performance.now();
+  for (const [key, due] of held) if (key !== 'ArrowUp' && now >= due) { held.set(key, now + (key === 'ArrowDown' ? 65 : 85)); actions[key](); if (over) break; }
+}, 15);
+window.addEventListener('blur', () => { stopHeld(); if (!paused && !over) togglePause(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden && !paused && !over) togglePause(); });
+document.getElementById('restart').addEventListener('click', restart);
+pauseButton.addEventListener('click', togglePause);
+restart();
+</script>
+</body>
+</html>
